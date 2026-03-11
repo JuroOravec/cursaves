@@ -285,6 +285,7 @@ def import_snapshot(
     content_blobs = snapshot.get("contentBlobs", {})
     message_contexts = snapshot.get("messageContexts", {})
     bubble_entries = snapshot.get("bubbleEntries", {})
+    checkpoints = snapshot.get("checkpoints", {})
 
     # ── Conflict check ──────────────────────────────────────────────
     global_db_path = paths.get_global_db_path()
@@ -334,9 +335,6 @@ def import_snapshot(
         new_name = f"{chat_name} (from {source_label})"
         composer_data["composerId"] = new_id
         composer_data["name"] = new_name
-        # Remap all bubble entries and message contexts to the new ID
-        bubble_entries = {bid: bdata for bid, bdata in bubble_entries.items()}
-        message_contexts = {k: v for k, v in message_contexts.items()}
         composer_id = new_id
         print(
             f"  Diverged: \"{chat_name}\" — local and {source_label} both have unique messages"
@@ -379,6 +377,18 @@ def import_snapshot(
             global_cdb.write_json_batch([
                 (f"bubbleId:{composer_id}:{bubble_id}", bubble_data)
                 for bubble_id, bubble_data in bubble_entries.items()
+            ])
+
+        # Write checkpoint data (workspace state snapshots for agent continuation)
+        if checkpoints:
+            if source_path and source_path != target_path:
+                checkpoints = {
+                    cp_id: rewrite_paths(cp_data, source_path, target_path)
+                    for cp_id, cp_data in checkpoints.items()
+                }
+            global_cdb.write_json_batch([
+                (f"checkpointId:{composer_id}:{cp_id}", cp_data)
+                for cp_id, cp_data in checkpoints.items()
             ])
     finally:
         global_cdb.close()
@@ -936,6 +946,20 @@ def copy_between_workspaces(
                         ctx_items.append((f"messageRequestContext:{new_id}:{msg_key}", val))
                 if ctx_items:
                     write_cdb.write_json_batch(ctx_items)
+
+            # Copy checkpoint data
+            cp_keys = read_cdb.list_keys(f"checkpointId:{old_id}:")
+            if cp_keys:
+                cp_items = []
+                for key in cp_keys:
+                    cp_id = key[len(f"checkpointId:{old_id}:"):]
+                    val = read_cdb.get_json(key)
+                    if val:
+                        if needs_rewrite:
+                            val = rewrite_paths(val, source_norm, target_norm)
+                        cp_items.append((f"checkpointId:{new_id}:{cp_id}", val))
+                if cp_items:
+                    write_cdb.write_json_batch(cp_items)
 
             # Register in target workspace
             if _register_in_workspace(new_id, new_data, target_ws_dir):

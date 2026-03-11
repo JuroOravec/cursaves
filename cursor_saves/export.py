@@ -310,6 +310,14 @@ def export_conversation(
                 short_key = key[len(f"messageRequestContext:{composer_id}:"):]
                 contexts[short_key] = val
 
+        # Checkpoint data (workspace state snapshots at each agent turn)
+        checkpoints = {}
+        for key in _cdb.list_keys(f"checkpointId:{composer_id}:"):
+            val = _cdb.get_json(key)
+            if val:
+                cp_id = key[len(f"checkpointId:{composer_id}:"):]
+                checkpoints[cp_id] = val
+
         snapshot = {
             "version": 3,
             "exportedAt": datetime.now(timezone.utc).isoformat(),
@@ -321,6 +329,7 @@ def export_conversation(
             "composerData": conv_data,
             "contentBlobs": blobs,
             "bubbleEntries": bubbles,
+            "checkpoints": checkpoints,
             "transcript": get_transcript(project_path, composer_id),
             "messageContexts": contexts,
         }
