@@ -260,6 +260,61 @@ def _trim_message_contexts(contexts: dict[str, Any], max_size_bytes: int) -> dic
     return trimmed
 
 
+def _extract_agent_blob_ids(conv_data: dict) -> set[str]:
+    """Extract agentKv blob IDs referenced by a conversation.
+
+    The composerData.conversationState field is a base64-encoded protobuf
+    prefixed with '~'. It contains repeated 32-byte blob IDs (protobuf
+    field 1, wire type 2, length 32) which reference agentKv:blob:{hex}
+    entries in cursorDiskKV.
+    """
+    import base64
+
+    cs = conv_data.get("conversationState", "")
+    if not cs or not isinstance(cs, str) or not cs.startswith("~") or len(cs) < 10:
+        return set()
+
+    try:
+        raw = base64.b64decode(cs[1:])
+    except Exception:
+        return set()
+
+    blob_ids: set[str] = set()
+    i = 0
+    while i < len(raw) - 33:
+        if raw[i] == 0x0A and raw[i + 1] == 0x20:
+            blob_ids.add(raw[i + 2 : i + 34].hex())
+            i += 34
+        else:
+            i += 1
+    return blob_ids
+
+
+def _extract_agent_blobs(
+    conv_data: dict,
+    cdb: "db.CursorDB",
+) -> dict[str, str]:
+    """Fetch agentKv blob entries referenced by a conversation.
+
+    Returns a dict mapping hex blob IDs to their base64-encoded values.
+    Values are stored as binary in the DB; we base64-encode them for JSON
+    serialization in the snapshot.
+    """
+    import base64
+
+    blob_ids = _extract_agent_blob_ids(conv_data)
+    if not blob_ids:
+        return {}
+
+    blobs: dict[str, str] = {}
+    for bid in blob_ids:
+        key = f"agentKv:blob:{bid}"
+        val = cdb.get_item_binary(key, table="cursorDiskKV")
+        if val is not None:
+            blobs[bid] = base64.b64encode(val).decode("ascii")
+    return blobs
+
+
 def export_conversation(
     project_path: str,
     composer_id: str,
@@ -318,6 +373,12 @@ def export_conversation(
                 cp_id = key[len(f"checkpointId:{composer_id}:"):]
                 checkpoints[cp_id] = val
 
+        # Agent state blobs (encrypted agent context needed for continuation).
+        # The conversationState field in composerData is a protobuf containing
+        # references to agentKv:blob:{hex} entries. Without these, Cursor's
+        # agent loop fails with "Blob not found" when continuing the chat.
+        agent_blobs = _extract_agent_blobs(conv_data, _cdb)
+
         snapshot = {
             "version": 3,
             "exportedAt": datetime.now(timezone.utc).isoformat(),
@@ -330,6 +391,7 @@ def export_conversation(
             "contentBlobs": blobs,
             "bubbleEntries": bubbles,
             "checkpoints": checkpoints,
+            "agentBlobs": agent_blobs,
             "transcript": get_transcript(project_path, composer_id),
             "messageContexts": contexts,
         }

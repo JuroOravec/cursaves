@@ -286,6 +286,7 @@ def import_snapshot(
     message_contexts = snapshot.get("messageContexts", {})
     bubble_entries = snapshot.get("bubbleEntries", {})
     checkpoints = snapshot.get("checkpoints", {})
+    agent_blobs = snapshot.get("agentBlobs", {})
 
     # ── Conflict check ──────────────────────────────────────────────
     global_db_path = paths.get_global_db_path()
@@ -389,6 +390,14 @@ def import_snapshot(
             global_cdb.write_json_batch([
                 (f"checkpointId:{composer_id}:{cp_id}", cp_data)
                 for cp_id, cp_data in checkpoints.items()
+            ])
+
+        # Write agent state blobs (encrypted context for conversation continuation)
+        if agent_blobs:
+            import base64
+            global_cdb.write_batch([
+                (f"agentKv:blob:{bid}", base64.b64decode(bdata))
+                for bid, bdata in agent_blobs.items()
             ])
     finally:
         global_cdb.close()

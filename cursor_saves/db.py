@@ -85,6 +85,22 @@ class CursorDB:
         except sqlite3.OperationalError:
             return None
 
+    def get_item_binary(self, key: str, table: str = "ItemTable") -> Optional[bytes]:
+        """Get a raw binary value from the key-value store."""
+        conn = self._ensure_read_copy()
+        try:
+            row = conn.execute(
+                f"SELECT value FROM {table} WHERE key = ?", (key,)
+            ).fetchone()
+            if row is None:
+                return None
+            val = row[0]
+            if isinstance(val, str):
+                return val.encode("utf-8")
+            return val
+        except sqlite3.OperationalError:
+            return None
+
     def get_disk_kv(self, key: str) -> Optional[str]:
         """Get a value from the cursorDiskKV table."""
         return self.get_item(key, table="cursorDiskKV")
