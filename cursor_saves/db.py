@@ -170,10 +170,14 @@ class CursorDB:
 
 
 
-def backup_db(db_path: Path) -> Path:
+def backup_db(db_path: Path, keep: int = 2) -> Path:
     """Create a timestamped backup of a database file.
 
-    Returns the path to the backup.
+    Keeps only the most recent `keep` backups (default 2) and deletes
+    older ones to prevent unbounded disk usage. The global DB can be
+    multi-GB, so even a handful of stale backups can fill a disk.
+
+    Returns the path to the new backup.
     """
     from datetime import datetime
 
@@ -181,10 +185,22 @@ def backup_db(db_path: Path) -> Path:
     backup_path = db_path.parent / f"{db_path.stem}.backup_{timestamp}{db_path.suffix}"
     shutil.copy2(db_path, backup_path)
 
-    # Also backup WAL/SHM
     for suffix in ("-wal", "-shm"):
         wal = db_path.parent / (db_path.name + suffix)
         if wal.exists():
             shutil.copy2(wal, db_path.parent / (backup_path.name + suffix))
+
+    # Clean up old backups, keeping only the newest `keep`
+    pattern = f"{db_path.stem}.backup_*{db_path.suffix}"
+    old_backups = sorted(
+        db_path.parent.glob(pattern),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in old_backups[keep:]:
+        stale.unlink(missing_ok=True)
+        for suffix in ("-wal", "-shm"):
+            sidecar = stale.parent / (stale.name + suffix)
+            sidecar.unlink(missing_ok=True)
 
     return backup_path
