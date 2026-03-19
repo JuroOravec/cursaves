@@ -289,11 +289,19 @@ def resolve_workspace(selector: str) -> Optional[dict]:
     except ValueError:
         pass
 
-    # Try as workspace hash (exact directory name match) — check conversations
-    # list first, then fall back to all workspaces so hash-only entries work too
+    # Try as workspace hash (exact match, or prefix match when selector is 8 chars (short hash))
+    # Allow the short hash because that's what's displayed in the workspaces list,
+    # so user can just copy-paste the short hash, e.g. `cursaves push -w 497e8ab0`
     for ws in workspaces:
-        if ws["workspace_dir"].name == selector:
-            return ws
+        name = ws["workspace_dir"].name
+        if len(selector) == 8:
+            # Short hash match (8 chars) - allow prefix match
+            if name.startswith(selector):
+                return ws
+        else:
+            # Exact match
+            if name == selector:
+                return ws
 
     # Try as path substring
     for ws in workspaces:
