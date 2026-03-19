@@ -195,6 +195,8 @@ All commands default to the current working directory as the project path. Use `
 | `export <id>`  | Export one conversation to a snapshot                               | No                    |
 | `checkpoint`   | Export all conversations (no git)                                   | No                    |
 | `import --all` | Import snapshots (no git)                                           | Yes                   |
+| `copy`         | Copy conversations between two workspaces (same IDs)                | Yes                   |
+| `duplicate`    | Duplicate conversations with new IDs (within or across workspaces)  | Yes                   |
 | `watch`        | Auto-checkpoint and sync in the background                          | No (reads only)       |
 
 Most of the time you only need `push` and `pull`. Use `push -s` when you want to push only specific conversations instead of everything. Use `delete` to clean up snapshots you no longer need.
@@ -274,7 +276,7 @@ Note: "Developer: Reload Window" is not sufficient -- it reloads the renderer bu
 ## Safety
 
 - **Read operations** (`list`, `export`, `checkpoint`, `status`, `watch`) work on a temporary copy of the database. They never touch Cursor's files and are safe to run while Cursor is open.
-- **Write operations** (`import`, `pull`) back up the target database before writing, and refuse to run while Cursor is detected as running. Use `--force` to override (not recommended).
+- **Write operations** (`import`, `pull`, `copy`, `duplicate`) back up the target database before writing, and refuse to run while Cursor is detected as running. Use `--force` to override (not recommended).
 - Snapshots are self-contained JSON -- even if import goes wrong, you always have the raw data and the backup.
 
 ## Privacy Warning
@@ -314,6 +316,24 @@ cursaves pull
 This also works with `-s` to selectively pick which conversations to copy, and with `-w` to target specific workspaces without `cd`-ing into them.
 
 No remote repo is needed for this — `cursaves init` (without `--remote`) is enough for local-only use.
+
+### Duplicating chats with new IDs
+
+`copy` keeps the same conversation IDs, so the copy and original are linked — importing a copy again won't create a second one. `duplicate` creates fully independent copies with new IDs, which means:
+
+- You can have the original and the copy open in the same workspace side by side
+- Continuing either one won't affect the other
+- Good for branching a conversation to explore a different approach
+
+```bash
+# Interactive: pick source workspace, select chats, pick target (or Enter for same workspace)
+cursaves duplicate
+
+# Use --force to suppress the Cursor-running warning
+cursaves duplicate --force
+```
+
+If the target workspace already has a chat with the same title, the duplicate is named with a numeric suffix: `(1)`, `(2)`, and so on. With no name collision (typical when copying into an empty-looking workspace), the title stays unchanged. File path references in the chat are rewritten automatically if the source and target workspaces are at different paths.
 
 ### SSH remote projects
 

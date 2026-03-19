@@ -11,6 +11,7 @@ from pathlib import Path
 from . import __version__, db, export, paths
 from .importer import (
     copy_between_workspaces,
+    duplicate_chats,
     find_snapshot_dir_for_project,
     format_sync_status,
     get_push_status_for_conversation,
@@ -1580,6 +1581,64 @@ def cmd_copy(args):
         print("Nothing done.")
 
 
+def cmd_duplicate(args):
+    """Duplicate conversations with new IDs (within or across workspaces)."""
+    # Source workspace
+    print(f"\n  Select SOURCE workspace (duplicate from):")
+    source = _select_workspace()
+    if not source:
+        return
+    source_path, source_ws_dir, source_host = source
+
+    # Select which conversations to duplicate
+    composer_ids = _select_conversations(
+        source_path, prompt="duplicate", workspace_dir=source_ws_dir
+    )
+    if not composer_ids:
+        print("No conversations selected.")
+        return
+
+    # Target workspace — default to same as source (within-workspace clone)
+    print(f"\n  Select TARGET workspace (or press Enter to duplicate within the same workspace):")
+    target = _select_workspace()
+    if target is None:
+        # User pressed Enter with no input — treat as "same workspace"
+        target_path, target_ws_dir, target_host = source_path, source_ws_dir, source_host
+        print(f"  Duplicating within the same workspace: {os.path.basename(source_path)}")
+    else:
+        target_path, target_ws_dir, target_host = target
+
+    source_label = os.path.basename(os.path.normpath(source_path))
+    target_label = os.path.basename(os.path.normpath(target_path))
+    if source_host:
+        source_label += f" ({source_host})"
+    if target_host:
+        target_label += f" ({target_host})"
+
+    if str(source_ws_dir) == str(target_ws_dir):
+        print(f"\n  Duplicating {len(composer_ids)} chat(s) within: {source_label}\n")
+    else:
+        print(f"\n  Duplicating {len(composer_ids)} chat(s): {source_label} → {target_label}\n")
+
+    success, failure = duplicate_chats(
+        composer_ids,
+        source_ws_dir=source_ws_dir,
+        target_ws_dir=target_ws_dir,
+        source_path=source_path,
+        target_path=target_path,
+        force=getattr(args, "force", False),
+    )
+
+    if success > 0:
+        print(f"\nDone. Duplicated {success} chat(s).")
+        from .reload import print_reload_hint
+        print_reload_hint()
+    elif failure > 0:
+        print(f"\nFailed to duplicate {failure} chat(s).")
+    else:
+        print("Nothing done.")
+
+
 def cmd_status(args):
     """Show sync status -- what's local vs what's in snapshots."""
     _ensure_synced()  # Pull latest from remote first
@@ -2004,6 +2063,17 @@ def main():
     )
     p_copy.set_defaults(func=cmd_copy)
 
+    # ── duplicate ──────────────────────────────────────────────────
+    p_duplicate = subparsers.add_parser(
+        "duplicate",
+        help="Duplicate conversations with new IDs (within or across workspaces)",
+    )
+    p_duplicate.add_argument(
+        "--force", action="store_true",
+        help="Suppress the Cursor-running warning",
+    )
+    p_duplicate.set_defaults(func=cmd_duplicate)
+
     # ── status ──────────────────────────────────────────────────────
     p_status = subparsers.add_parser("status", help="Show sync status")
     add_project_args(p_status)
@@ -2044,6 +2114,7 @@ def main():
             "─── Copy between workspaces (same machine) ─────────────────────\n"
             "\n"
             "  copy                  Copy chats between workspaces\n"
+            "  duplicate             Duplicate chats with new IDs (within or across workspaces)\n"
             "\n"
             "─── Info & management ──────────────────────────────────────────\n"
             "\n"

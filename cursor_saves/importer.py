@@ -1010,6 +1010,217 @@ def copy_between_workspaces(
     return success, failure
 
 
+# ── Duplicate ────────────────────────────────────────────────────────────
+
+
+def _pick_duplicate_display_name(original_name: str, used_names: set[str]) -> str:
+    """Return a sidebar name for a duplicated chat.
+
+    Keeps ``original_name`` when it does not collide with names already in
+    ``used_names``. Otherwise uses ``name (1)``, ``name (2)``, ...
+    """
+    if original_name not in used_names:
+        return original_name
+    n = 1
+    while True:
+        candidate = f"{original_name} ({n})"
+        if candidate not in used_names:
+            return candidate
+        n += 1
+
+
+def duplicate_chats(
+    composer_ids: list[str],
+    source_ws_dir: Path,
+    target_ws_dir: Path,
+    source_path: str,
+    target_path: str,
+    force: bool = False,
+) -> tuple[int, int]:
+    """Duplicate conversations with new IDs, optionally into a different workspace.
+
+    Unlike copy_between_workspaces, this:
+    - Allows source and target to be the same workspace (within-workspace clone).
+    - Keeps the original chat title unless it would collide with an existing chat
+      in the target workspace; then uses ``(1)``, ``(2)``, ...
+    - Duplicates agent blobs under new IDs so the copies are fully independent.
+
+    Returns (success_count, failure_count).
+    """
+    from .export import _extract_agent_blob_ids
+
+    if not force and is_cursor_running():
+        print(
+            "WARNING: Cursor is running. Close Cursor FIRST (Cmd+Q / quit),\n"
+            "then run this command, then reopen Cursor.\n"
+            "Use --force to override (not recommended).\n",
+            file=sys.stderr,
+        )
+        return 0, 0
+
+    global_db_path = paths.get_global_db_path()
+    source_norm = os.path.normpath(source_path)
+    target_norm = os.path.normpath(target_path)
+    needs_rewrite = source_norm != target_norm
+    success = 0
+    failure = 0
+
+    # Collect names already in the target workspace so we can avoid collisions.
+    target_db_path = target_ws_dir / "state.vscdb"
+    target_names: set[str] = set()
+    if target_db_path.exists():
+        with db.CursorDB(target_db_path) as tcdb:
+            target_data = tcdb.get_json("composer.composerData", table="ItemTable")
+            if target_data:
+                for c in target_data.get("allComposers", []):
+                    n = c.get("name")
+                    if n:
+                        target_names.add(n)
+
+    read_cdb = db.CursorDB(global_db_path)
+    write_cdb = db.CursorDB(global_db_path)
+    try:
+        for old_id in composer_ids:
+            composer_data = read_cdb.get_json(f"composerData:{old_id}")
+            if not composer_data:
+                print(f"  {old_id[:12]}... not found in global DB", file=sys.stderr)
+                failure += 1
+                continue
+
+            original_name = composer_data.get("name", "Untitled")
+
+            new_name = _pick_duplicate_display_name(original_name, target_names)
+
+            new_id = str(uuid.uuid4())
+
+            # Deep-copy composerData, assign new ID and name.
+            new_data = json.loads(json.dumps(composer_data))
+            new_data["composerId"] = new_id
+            new_data["name"] = new_name
+            if needs_rewrite:
+                new_data = rewrite_paths(new_data, source_norm, target_norm)
+
+            # Duplicate agent blobs under new hex IDs and rewrite conversationState.
+            blob_id_map: dict[str, str] = {}
+            old_blob_ids = _extract_agent_blob_ids(new_data)
+            if old_blob_ids:
+                new_blob_items = []
+                for old_bid in old_blob_ids:
+                    val = read_cdb.get_item_binary(
+                        f"agentKv:blob:{old_bid}", table="cursorDiskKV"
+                    )
+                    if val is not None:
+                        new_bid = uuid.uuid4().hex  # 32-char hex, same format
+                        blob_id_map[old_bid] = new_bid
+                        new_blob_items.append((f"agentKv:blob:{new_bid}", val))
+                if new_blob_items:
+                    write_cdb.write_batch(new_blob_items)
+                # Rewrite blob ID references inside conversationState.
+                for old_bid, new_bid in blob_id_map.items():
+                    new_data = _rewrite_blob_id_in_state(new_data, old_bid, new_bid)
+
+            write_cdb.write_json(f"composerData:{new_id}", new_data)
+
+            # Copy bubble entries.
+            bubble_keys = read_cdb.list_keys(f"bubbleId:{old_id}:")
+            if bubble_keys:
+                bubble_items = []
+                for key in bubble_keys:
+                    bubble_id = key[len(f"bubbleId:{old_id}:"):]
+                    val = read_cdb.get_json(key)
+                    if val:
+                        if needs_rewrite:
+                            val = rewrite_paths(val, source_norm, target_norm)
+                        bubble_items.append((f"bubbleId:{new_id}:{bubble_id}", val))
+                if bubble_items:
+                    write_cdb.write_json_batch(bubble_items)
+
+            # Copy message contexts.
+            ctx_keys = read_cdb.list_keys(f"messageRequestContext:{old_id}:")
+            if ctx_keys:
+                ctx_items = []
+                for key in ctx_keys:
+                    msg_key = key[len(f"messageRequestContext:{old_id}:"):]
+                    val = read_cdb.get_json(key)
+                    if val:
+                        ctx_items.append((f"messageRequestContext:{new_id}:{msg_key}", val))
+                if ctx_items:
+                    write_cdb.write_json_batch(ctx_items)
+
+            # Copy checkpoint data.
+            cp_keys = read_cdb.list_keys(f"checkpointId:{old_id}:")
+            if cp_keys:
+                cp_items = []
+                for key in cp_keys:
+                    cp_id = key[len(f"checkpointId:{old_id}:"):]
+                    val = read_cdb.get_json(key)
+                    if val:
+                        if needs_rewrite:
+                            val = rewrite_paths(val, source_norm, target_norm)
+                        cp_items.append((f"checkpointId:{new_id}:{cp_id}", val))
+                if cp_items:
+                    write_cdb.write_json_batch(cp_items)
+
+            if _register_in_workspace(new_id, new_data, target_ws_dir):
+                suffix_note = f", paths rewritten" if needs_rewrite else ""
+                blob_note = f", {len(blob_id_map)} blob(s) duplicated" if blob_id_map else ""
+                if new_name == original_name:
+                    print(f"  Duplicated: \"{original_name}\"{suffix_note}{blob_note}")
+                else:
+                    print(
+                        f"  Duplicated: \"{original_name}\" → \"{new_name}\"{suffix_note}{blob_note}"
+                    )
+                target_names.add(new_name)
+                success += 1
+            else:
+                print(f"  Failed: {original_name}", file=sys.stderr)
+                failure += 1
+    finally:
+        read_cdb.close()
+        write_cdb.close()
+
+    return success, failure
+
+
+def _rewrite_blob_id_in_state(composer_data: dict, old_bid: str, new_bid: str) -> dict:
+    """Rewrite a blob ID inside the base64-encoded conversationState protobuf.
+
+    The conversationState field is a '~' + base64(protobuf) string.
+    Blob IDs appear as raw 32-byte sequences inside the protobuf.
+    We replace old_bid (hex string -> bytes) with new_bid bytes in place.
+    """
+    cs = composer_data.get("conversationState", "")
+    if not cs or not isinstance(cs, str) or not cs.startswith("~"):
+        return composer_data
+
+    import base64
+
+    try:
+        raw = bytearray(base64.b64decode(cs[1:]))
+    except Exception:
+        return composer_data
+
+    old_bytes = bytes.fromhex(old_bid)
+    new_bytes = bytes.fromhex(new_bid)
+
+    # Replace all occurrences of the 32-byte blob ID in the binary payload.
+    result = bytearray()
+    i = 0
+    while i <= len(raw) - 32:
+        if raw[i:i + 32] == old_bytes:
+            result.extend(new_bytes)
+            i += 32
+        else:
+            result.append(raw[i])
+            i += 1
+    result.extend(raw[i:])
+
+    new_cs = "~" + base64.b64encode(bytes(result)).decode("ascii")
+    composer_data = dict(composer_data)
+    composer_data["conversationState"] = new_cs
+    return composer_data
+
+
 # ── Blob repair ──────────────────────────────────────────────────────────
 
 
