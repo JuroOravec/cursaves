@@ -2,19 +2,19 @@
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?style=flat&logo=buy-me-a-coffee)](https://buymeacoffee.com/callumward)
 
-Cursor stores chats locally. Switch machines and they're gone. This tool saves your chats to a git repo so you can restore them anywhere — or copy them between workspaces on the same machine.
+Cursor stores chats locally. Switch machines and they're gone. This tool saves your chats to a git repo (or S3 bucket) so you can restore them anywhere — or copy them between workspaces on the same machine.
 
 ## How It Works
 
 ### Terminology
 
-| Term               | Meaning                                                                                                                      |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| **Chat**           | A conversation with the AI in Cursor                                                                                         |
-| **Workspace**      | Cursor creates one for each directory (or `.code-workspace` file) you open. Chats belong to workspaces.                      |
+| Term               | Meaning                                                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| **Chat**           | A conversation with the AI in Cursor                                                                                      |
+| **Workspace**      | Cursor creates one for each directory (or `.code-workspace` file) you open. Chats belong to workspaces.                   |
 | **Workspace hash** | The opaque directory name under `workspaceStorage/`; use with `-w` when number/path doesn't work (e.g. custom workspaces) |
-| **Project ID**     | How cursaves groups snapshots - based on git remote URL or directory name                                                    |
-| **Snapshot**       | An exported chat saved to `~/.cursaves/snapshots/<project-id>/`                                                              |
+| **Project ID**     | How cursaves groups snapshots - based on git remote URL or directory name                                                 |
+| **Snapshot**       | An exported chat saved to `~/.cursaves/snapshots/<project-id>/`                                                           |
 
 ### Chat → Workspace → Project Mapping
 
@@ -54,18 +54,22 @@ This means you can sync chats for the same repo across different machines, even 
 # Install globally (once per machine)
 uv tool install git+https://github.com/Callum-Ward/cursaves.git
 
-# Initialize the sync repo (once per machine)
+# Initialize with a git remote (once per machine)
 cursaves init --remote git@github.com:you/my-cursaves.git
+
+# Or with an S3 bucket
+cursaves init --backend s3 --bucket my-cursor-saves
 ```
 
 Then from any project directory:
 
 ```bash
-# Save all conversations and push to remote
-cursaves push
+# Automatic bidirectional sync (pull behind + push ahead)
+cursaves sync
 
-# On another machine: pull and restore conversations
-cursaves pull
+# Or manually:
+cursaves push              # save and push to remote
+cursaves pull              # pull and restore conversations
 # Then restart Cursor (quit and reopen) to see the imported chats
 ```
 
@@ -80,7 +84,7 @@ cursaves push -w 3
 cursaves push -w 497e8ab0   # by hash (from the Hash column)
 ```
 
-`push` checkpoints your conversations, commits, and pushes to git. `pull` fetches from git and imports into Cursor's database. After importing, restart Cursor (quit and reopen) to see the conversations.
+`push` checkpoints your conversations and pushes to the remote. `pull` fetches from the remote and imports into Cursor's database. `sync` does both automatically — pulling conversations where your local copy is behind, and pushing ones where your local copy is ahead. After importing, restart Cursor (quit and reopen) to see the conversations.
 
 ### Example
 
@@ -111,14 +115,18 @@ cadfb263-3326-4aff-8887-dcc12f736b11     Feedback on documentation...   agent   
 
 ## Installation
 
-**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS or Linux, Git. Zero external Python dependencies.
+**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS or Linux, Git (for git backend). Zero required Python dependencies.
 
 **Tested with:** Cursor 2.6.11
 
 ### Install as a global CLI tool (recommended)
 
 ```bash
+# Standard install (git backend only)
 uv tool install git+https://github.com/Callum-Ward/cursaves.git
+
+# With S3 support
+uv tool install "cursaves[s3] @ git+https://github.com/Callum-Ward/cursaves.git"
 ```
 
 This puts `cursaves` on your PATH so you can run it from any directory. Run this on each machine you want to sync between.
@@ -145,58 +153,70 @@ python -m cursor_saves <command>
 
 ## Setup
 
-`cursaves` stores conversation snapshots in a local git repo at `~/.cursaves/`. To sync between machines, you point this at a remote repository.
+`cursaves` stores conversation snapshots locally at `~/.cursaves/snapshots/`. To sync between machines, you configure a **backend** — either a git remote or an S3 bucket.
 
-### 1. Create a private repo for your checkpoints
+### Option A: Git backend (default)
 
-Go to GitHub (or GitLab, etc.) and create a **new private repository**. This is where your conversation data will be stored -- keep it private since snapshots contain your full chat history, file paths, and machine info.
-
-For example: `github.com/you/cursaves-data` (private).
-
-Don't add a README or any files -- leave it completely empty.
-
-### 2. Initialize on each machine
+1. Create a **private** repository on GitHub/GitLab (empty, no README).
+2. Initialize on each machine:
 
 ```bash
 cursaves init --remote git@github.com:you/cursaves-data.git
 ```
 
-This creates `~/.cursaves/` with a git repo, a `snapshots/` directory, and the remote configured. Run this once on every machine you want to sync between.
+This creates `~/.cursaves/` with a git repo and the remote configured. If you only want local checkpoints (no syncing), run `cursaves init` without `--remote`.
 
-If you only want local checkpoints (no syncing), just run `cursaves init` without `--remote`. You can add a remote later with `cd ~/.cursaves && git remote add origin <url>`.
+### Option B: S3 backend
 
-### 3. Start syncing
+1. Create an S3 bucket (private).
+2. Configure AWS credentials (`aws configure`, env vars, or IAM role).
+3. Install with S3 support and initialize:
 
 ```bash
-# From any project directory:
-cursaves push              # checkpoint + commit + push
+uv tool install "cursaves[s3] @ git+https://github.com/Callum-Ward/cursaves.git"
+cursaves init --backend s3 --bucket my-cursor-saves --region us-east-1
+```
+
+S3 avoids git history overhead and works well for large snapshot sets. Authentication uses the standard AWS credential chain.
+
+### Start syncing
+
+```bash
+# Automatic bidirectional sync (recommended)
+cursaves sync
+
+# Or manually:
+cursaves push              # checkpoint + push
 cursaves pull              # pull + import into Cursor's database
 # Then restart Cursor to see the imported conversations
 ```
 
-The first `push` will create the initial commit on the remote. After that, `push` and `pull` keep everything in sync.
+The `sync` command pulls conversations where your local copy is behind the remote, then pushes conversations where your local copy is ahead — fully automatic, no prompts.
 
 ## Commands
 
 All commands default to the current working directory as the project path. Use `-w <selector>` to target a workspace by number, hash, or path substring (from `cursaves workspaces`), or `-p /path` to specify a path directly.
 
-| Command        | Description                                                         | Modifies Cursor data? |
-| -------------- | ------------------------------------------------------------------- | --------------------- |
-| **`push`**     | **Checkpoint + commit + push (the main command)**                   | No                    |
-| **`push -s`**  | **Interactively select which conversations to push**                | No                    |
-| **`pull`**     | **Git pull + import snapshots**                                     | Yes                   |
-| `init`         | Initialize the sync repo at ~/.cursaves/                            | No                    |
-| `workspaces`   | List all Cursor workspaces (local, SSH remote, workspace) with hash | No                    |
-| `list`         | Show conversations for a project                                    | No                    |
-| `status`       | Compare local conversations vs snapshots                            | No                    |
-| `reload`       | Trigger Cursor to reload and pick up imported conversations         | No                    |
-| `delete`       | Delete cached snapshots (interactive, by ID, or all)                | No                    |
-| `export <id>`  | Export one conversation to a snapshot                               | No                    |
-| `checkpoint`   | Export all conversations (no git)                                   | No                    |
-| `import --all` | Import snapshots (no git)                                           | Yes                   |
-| `watch`        | Auto-checkpoint and sync in the background                          | No (reads only)       |
+| Command        | Description                                                | Modifies Cursor data? |
+| -------------- | ---------------------------------------------------------- | --------------------- | --- | --- |
+| **`sync`**     | **Pull behind + push ahead — one command to stay in sync** | Yes                   |
+| **`push`**     | **Checkpoint + push to remote**                            | No                    |
+| **`push -s`**  | **Interactively select which conversations to push**       | No                    |
+| **`pull`**     | **Pull from remote + import snapshots**                    | Yes                   |     | Yes |
+| `init`         | Initialize sync (git remote, S3 bucket, etc.)              | No                    |
+| `workspaces`   | List all Cursor workspaces (local + SSH remote)            | No                    |
+| `list`         | Show conversations for a project                           | No                    |
+| `snapshots`    | List snapshot projects available in ~/.cursaves/           | No                    |
+| `status`       | Compare local conversations vs snapshots                   | No                    |
+| `repair`       | Restore missing agent blobs from snapshots                 | Yes                   |
+| `delete`       | Delete cached snapshots (interactive, by ID, or all)       | No                    |
+| `export <id>`  | Export one conversation to a snapshot                      | No                    |
+| `checkpoint`   | Export all conversations (no push)                         | No                    |
+| `import --all` | Import snapshots (no pull)                                 | Yes                   |
+| `watch`        | Auto-checkpoint and sync in the background                 | No (reads only)       |
+| `copy`         | Copy conversations between workspaces (same machine)       | Yes                   |
 
-Most of the time you only need `push` and `pull`. Use `push -s` when you want to push only specific conversations instead of everything. Use `delete` to clean up snapshots you no longer need.
+Most of the time you only need `sync`. Use `push -s` when you want to push specific conversations. Use `repair` if you get "Blob not found" errors after importing. Use `delete` to clean up snapshots you no longer need.
 
 ### Auto-sync with `watch`
 
@@ -269,11 +289,11 @@ Snapshot files contain your **full conversation data**: your prompts, AI respons
 ### Local projects
 
 ```bash
-# On Machine A -- before switching, from your project directory:
-cursaves push
+# On Machine A -- before switching:
+cursaves sync       # pushes your ahead conversations
 
-# On Machine B -- after switching, from your project directory:
-cursaves pull
+# On Machine B -- after switching:
+cursaves sync       # pulls the latest, pushes anything ahead locally
 # Then restart Cursor (quit and reopen) to see the imported conversations
 ```
 
@@ -357,10 +377,15 @@ The daemon handles checkpoint + git push/pull automatically. When you switch mac
 ## Architecture
 
 ```
-~/.cursaves/                   # Sync repo (git, private remote)
+~/.cursaves/                   # Local snapshot store
   snapshots/
     github.com-user-repo/      # Identified by git remote URL
-      <composer-id>.json       # Self-contained conversation snapshot
+      <composer-id>.json.gz    # Self-contained conversation snapshot
+  .git/                        # Present when using git backend
+
+~/.config/cursaves/
+  config.json                  # Backend configuration (git, s3, etc.)
+  sync_state.json              # Tracks handled diverged snapshots
 
 ~/.local/bin/cursaves          # Global CLI tool (installed via uv)
 
@@ -371,7 +396,7 @@ cursaves/                      # Source repo (this repo, public)
   LICENSE
 ```
 
-The tool code (this repo) is separate from your conversation data (`~/.cursaves/`). Install the tool once, point it at a private remote, and sync from any project directory.
+The tool code (this repo) is separate from your conversation data (`~/.cursaves/`). Install the tool once, point it at a private remote (git or S3), and sync from any project directory.
 
 ## Contributing
 
